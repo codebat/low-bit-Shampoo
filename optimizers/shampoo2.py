@@ -159,7 +159,7 @@ class Preconditioner:
         w2 = 1.0 if w1 == 1.0 else (1.0 - w1)
         rank = len(self._transformed_shape)
         for j, grad in enumerate(partitioned_grads):
-            grad = grad.float() # Numerical stability for self.inv_root_mode == 0
+            grad = grad.float() # for numerical stability
             for i in range(rank):
                 if i == 1:
                     stat = grad.T @ grad

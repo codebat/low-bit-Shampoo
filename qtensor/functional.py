@@ -94,8 +94,11 @@ def create_dynamic_map(signed=True, total_bits=8, power=1):
 
 
 def create_linear_map(signed=True, total_bits=8, power=2):
-    data = torch.linspace(-1, 1, (2 ** total_bits))
-    data[2 ** (total_bits-1) - 1] = 0
+    if signed:
+        data = torch.linspace(-1, 1, (2 ** total_bits))
+        data[2 ** (total_bits-1) - 1] = 0
+    else:
+        data = torch.linspace(0, 1, (2 ** total_bits))
 
     return data.sign() * data.abs().pow(power)
 
