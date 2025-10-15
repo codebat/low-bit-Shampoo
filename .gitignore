@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Build artifacts
+build/
+cudaC_python/build/
+*.egg-info/
+.eggs/
+dist/
+
+# Dataset and checkpoints
+data/
+datasets/
+checkpoints/
+*.pt
+*.pth
+
+# IDE / OS clutter
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+

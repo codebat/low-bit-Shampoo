@@ -2,29 +2,47 @@
 
 ## Preparation
 
-1. Requirements:
+### Environment setup
 
-   ​	For running python code: pytorch+torchvision+timm+numpy.
+1. Create and activate a virtual environment (optional but recommended):
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-   ​	For compiling C code: gcc+nvcc+cmake (Linux), msvc+nvcc+cmake (Windows).
+The core packages are `torch`, `torchvision`, `timm`, `numpy`, and `cmake` (for building the CUDA quantizer).
 
-2. Compilation of the dynamic library used for quantization:
+### CUDA quantization library
 
-   ​	See "README.md" in path "./cudaC_python for the compilation process.
-   
-   ​	After compilation, move the dynamic library to path "./qtensor".
+Low-bit Shampoo relies on the CUDA kernels in `cudaC_python`. When training on GPU:
 
+```bash
+cmake -B cudaC_python/build cudaC_python
+cmake --build cudaC_python/build
+cp cudaC_python/build/qtensor/libqtensor_cuda*.so qtensor/
+```
 
+See `cudaC_python/README.md` for more operating-system specific notes. The shared object must be rebuilt on every new machine/Colab runtime.
+
+**CPU-only note:** If CUDA is unavailable (e.g., macOS or CPU servers), the repo now falls back to a pure PyTorch quantizer. You can skip the build step and still run 4-bit Shampoo on CPU/MPS for benchmarking.
 
 ## Usage
 
-File "main_demo.py" shows the basic usage of our optimizer codes, and the vision models used in our paper.
+- `main_demo.py` shows basic model/optimizer construction.
+- `train_cifar.py` trains CIFAR-100 models and supports AdamW/SGD plus the two Shampoo variants (32-bit and low-bit).
 
-File "shampoo1.py" in path "./optimizers" implements naive 4-bit Shampoo.
+Typical CIFAR-100 run:
+```bash
+python train_cifar.py --download --model resnet34 --optimizer shampoo2-adamw \
+                      --epochs 200 --batch-size 256 --data ./data --device cuda --amp
+```
+Swap `--optimizer` among `adamw`, `sgd`, `shampoo1-*`, and `shampoo2-*` to compare convergence.
 
-File "shampoo2.py" in path "./optimizers" implements our 4-bit Shampoo.
-
-
+When running on Google Colab, install requirements and rebuild the CUDA library as shown above, then mount Drive if you want checkpoints to persist.
 
 ## Results
 
@@ -52,4 +70,3 @@ File "shampoo2.py" in path "./optimizers" implements our 4-bit Shampoo.
     url = {https://arxiv.org/abs/2405.18144},
 }
 ```
-
