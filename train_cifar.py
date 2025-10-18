@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Iterable, Tuple
+
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import torch
 import torch.nn as nn
@@ -64,11 +68,51 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rect-t2", default=4, type=int, help="Shampoo2 SVD rectification t2")
     parser.add_argument("--inv-root-mode", default=0, type=int, choices=[0, 1], help="Shampoo2 inverse root method")
     parser.add_argument("--lr-scheduler", default="cosine", choices=["none", "cosine"])
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu", "mps"])
-    parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision (CUDA only)")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "cpu", "mps"],
+        help="compute device to target; auto prefers CUDA, then MPS, then CPU",
+    )
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="enable automatic mixed precision when supported (CUDA/MPS)",
+    )
     parser.add_argument("--print-freq", default=50, type=int)
     parser.add_argument("--output", default="./checkpoints", type=str, help="directory to store checkpoints and logs")
     return parser.parse_args()
+
+
+def resolve_device(device_flag: str) -> Tuple[torch.device, bool, bool, str]:
+    if device_flag == "auto":
+        if torch.cuda.is_available():
+            resolved = "cuda"
+        elif torch.backends.mps.is_available():
+            resolved = "mps"
+        else:
+            resolved = "cpu"
+    elif device_flag == "cuda" and not torch.cuda.is_available():
+        print("CUDA requested but not available, falling back to CPU.")
+        resolved = "cpu"
+    elif device_flag == "mps" and not torch.backends.mps.is_available():
+        print("MPS requested but not available, falling back to CPU.")
+        resolved = "cpu"
+    else:
+        resolved = device_flag
+
+    device = torch.device(resolved)
+    return device, resolved == "cuda", resolved == "mps", resolved
+
+
+def autocast_context(device: torch.device, enabled: bool):
+    if not enabled:
+        return nullcontext()
+    return torch.autocast(
+        device_type=device.type,
+        dtype=torch.float16,
+        enabled=True,
+    )
 
 
 def build_model(name: str) -> nn.Module:
@@ -105,7 +149,7 @@ def build_dataloaders(
     train_set = datasets.CIFAR100(root=root, train=True, download=download, transform=train_tf)
     test_set = datasets.CIFAR100(root=root, train=False, download=download, transform=val_tf)
 
-    pin_memory = device.type == "cuda"
+    pin_memory = device.type in {"cuda", "mps"}
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
@@ -227,6 +271,7 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     print_freq: int,
+    amp_enabled: bool,
     scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> Tuple[float, float]:
     model.train()
@@ -241,16 +286,15 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
+        with autocast_context(device, amp_enabled):
+            outputs = model(images)
+            loss = criterion(outputs, targets)
+
         if scaler is not None:
-            with torch.cuda.amp.autocast():
-                outputs = model(images)
-                loss = criterion(outputs, targets)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs = model(images)
-            loss = criterion(outputs, targets)
             loss.backward()
             optimizer.step()
 
@@ -282,6 +326,7 @@ def evaluate(
     criterion: nn.Module,
     data_loader: DataLoader,
     device: torch.device,
+    amp_enabled: bool,
 ) -> Tuple[float, float]:
     model.eval()
     loss_meter = AverageMeter()
@@ -292,8 +337,9 @@ def evaluate(
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
-        outputs = model(images)
-        loss = criterion(outputs, targets)
+        with autocast_context(device, amp_enabled):
+            outputs = model(images)
+            loss = criterion(outputs, targets)
 
         acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
         loss_meter.update(loss.item(), images.size(0))
@@ -310,14 +356,14 @@ def evaluate(
 def main() -> None:
     args = parse_args()
 
-    use_cuda = args.device == "cuda" and torch.cuda.is_available()
-    use_mps = args.device == "mps" and torch.backends.mps.is_available()
-    if args.device == "cuda" and not use_cuda:
-        print("CUDA not available, switching to CPU.")
-    if args.device == "mps" and not use_mps:
-        print("MPS not available, switching to CPU.")
+    overall_start = time.time()
 
-    device = torch.device("cuda" if use_cuda else "mps" if use_mps else "cpu")
+    device, use_cuda, use_mps, resolved = resolve_device(args.device)
+    if args.device == "auto":
+        print(f"Auto-selected device: {resolved}")
+    else:
+        print(f"Using device: {resolved}")
+
     torch.backends.cudnn.benchmark = use_cuda
 
     model = build_model(args.model).to(device)
@@ -337,7 +383,10 @@ def main() -> None:
     else:
         scheduler = None
 
-    scaler = torch.cuda.amp.GradScaler() if args.amp and use_cuda else None
+    amp_enabled = args.amp and (use_cuda or use_mps)
+    if args.amp and not amp_enabled:
+        print("Automatic mixed precision requested, but it is not supported on the selected device.")
+    scaler = torch.cuda.amp.GradScaler() if amp_enabled and use_cuda else None
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -352,10 +401,11 @@ def main() -> None:
             device,
             epoch,
             args.print_freq,
+            amp_enabled=amp_enabled,
             scaler=scaler,
         )
 
-        top1_val, loss_val = evaluate(model, criterion, val_loader, device)
+        top1_val, loss_val = evaluate(model, criterion, val_loader, device, amp_enabled=amp_enabled)
         best_top1 = max(best_top1, top1_val)
 
         if scheduler is not None:
@@ -375,7 +425,8 @@ def main() -> None:
         print(f"Saved checkpoint to {ckpt_path}")
         print(f"Best validation Top1 so far: {best_top1:.2f}%")
 
-    print("Training completed.")
+    total_elapsed = time.time() - overall_start
+    print(f"Training completed in {total_elapsed:.2f} seconds.")
 
 
 if __name__ == "__main__":
