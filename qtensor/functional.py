@@ -154,15 +154,26 @@ def quantize_blockwise(
 
         quan_func(get_ptr(A), get_ptr(code), corder, get_ptr(absmax), get_ptr(out), cblocksize)
     else:
-        out, absmax = _quantize_blockwise_cpu(
-            A=A,
-            code=code,
-            order=order,
-            absmax=absmax,
-            out=out,
-            blocksize=blocksize,
-            bits=bits,
-        )
+        if A.device.type == "mps":
+            out, absmax = _quantize_blockwise_vectorized(
+                A=A,
+                code=code,
+                order=order,
+                absmax=absmax,
+                out=out,
+                blocksize=blocksize,
+                bits=bits,
+            )
+        else:
+            out, absmax = _quantize_blockwise_cpu(
+                A=A,
+                code=code,
+                order=order,
+                absmax=absmax,
+                out=out,
+                blocksize=blocksize,
+                bits=bits,
+            )
 
     return out, absmax
 
@@ -199,16 +210,28 @@ def dequantize_blockwise(
 
         dequan_func(get_ptr(A), get_ptr(code), corder, get_ptr(absmax), get_ptr(out), cblocksize)
     else:
-        out = _dequantize_blockwise_cpu(
-            A=A,
-            code=code,
-            order=order,
-            absmax=absmax,
-            out=out,
-            blocksize=blocksize,
-            bits=bits,
-            outdtype=outdtype,
-        )
+        if A.device.type == "mps":
+            out = _dequantize_blockwise_vectorized(
+                A=A,
+                code=code,
+                order=order,
+                absmax=absmax,
+                out=out,
+                blocksize=blocksize,
+                bits=bits,
+                outdtype=outdtype,
+            )
+        else:
+            out = _dequantize_blockwise_cpu(
+                A=A,
+                code=code,
+                order=order,
+                absmax=absmax,
+                out=out,
+                blocksize=blocksize,
+                bits=bits,
+                outdtype=outdtype,
+            )
 
     return out
 
@@ -258,17 +281,30 @@ def quantize_blockwise_diagreal(
 
         quan_func(get_ptr(A), get_ptr(code), corder, get_ptr(absmax), get_ptr(diag), get_ptr(out), cblocksize)
     else:
-        out, absmax, diag = _quantize_blockwise_cpu(
-            A=A,
-            code=code,
-            order=order,
-            absmax=absmax,
-            out=out,
-            blocksize=blocksize,
-            bits=bits,
-            store_diag=True,
-            diag=diag,
-        )
+        if A.device.type == "mps":
+            out, absmax, diag = _quantize_blockwise_vectorized(
+                A=A,
+                code=code,
+                order=order,
+                absmax=absmax,
+                out=out,
+                blocksize=blocksize,
+                bits=bits,
+                store_diag=True,
+                diag=diag,
+            )
+        else:
+            out, absmax, diag = _quantize_blockwise_cpu(
+                A=A,
+                code=code,
+                order=order,
+                absmax=absmax,
+                out=out,
+                blocksize=blocksize,
+                bits=bits,
+                store_diag=True,
+                diag=diag,
+            )
 
     return out, absmax, diag
 
@@ -306,17 +342,183 @@ def dequantize_blockwise_diagreal(
 
         dequan_func(get_ptr(A), get_ptr(code), corder, get_ptr(absmax), get_ptr(diag), get_ptr(out), cblocksize)
     else:
-        out = _dequantize_blockwise_cpu(
-            A=A,
-            code=code,
-            order=order,
-            absmax=absmax,
-            out=out,
-            blocksize=blocksize,
-            bits=bits,
-            outdtype=outdtype,
-            diag=diag,
-        )
+        if A.device.type == "mps":
+            out = _dequantize_blockwise_vectorized(
+                A=A,
+                code=code,
+                order=order,
+                absmax=absmax,
+                out=out,
+                blocksize=blocksize,
+                bits=bits,
+                outdtype=outdtype,
+                diag=diag,
+            )
+        else:
+            out = _dequantize_blockwise_cpu(
+                A=A,
+                code=code,
+                order=order,
+                absmax=absmax,
+                out=out,
+                blocksize=blocksize,
+                bits=bits,
+                outdtype=outdtype,
+                diag=diag,
+            )
+
+def _quantize_blockwise_vectorized(
+    A: Tensor,
+    code: Tensor,
+    order: int,
+    absmax: Optional[Tensor],
+    out: Optional[Tensor],
+    blocksize: int,
+    bits: int,
+    store_diag: bool = False,
+    diag: Optional[Tensor] = None,
+):
+    if bits not in (4, 8):
+        raise ValueError(f"Unsupported bit width on vectorized quantization: {bits}")
+    if blocksize <= 0:
+        raise ValueError("blocksize must be positive.")
+
+    device = A.device
+    dtype = torch.float32
+    values_per_byte = 8 // bits
+    num_blocks_row = math.ceil(order / blocksize)
+    total_blocks = order * num_blocks_row
+    total_elems = order * order
+
+    code_float = code.to(device=device, dtype=dtype)
+    if code_float.ndim != 1 or code_float.numel() != 2 ** bits:
+        raise ValueError(f"code tensor must be 1-D with length 2**bits (got shape {code_float.shape})")
+    # Ensure sorted code for nearest lookup
+    if torch.any(code_float[1:] < code_float[:-1]):
+        code_sorted, sort_idx = torch.sort(code_float)
+    else:
+        code_sorted = code_float
+        sort_idx = None
+
+    # Prepare buffers
+    absmax = _prepare_buffer(absmax, total_blocks, device, torch.float32)
+    if store_diag:
+        diag = _prepare_buffer(diag, order, device, torch.float32)
+
+    expected_out_len = (total_elems + values_per_byte - 1) // values_per_byte
+    out = _prepare_buffer(out, expected_out_len, device, torch.uint8)
+    out.zero_()
+
+    # Pad to full blocks along columns
+    pad_cols = num_blocks_row * blocksize - order
+    if pad_cols:
+        A_pad = torch.nn.functional.pad(A.to(dtype), (0, pad_cols, 0, 0))
+    else:
+        A_pad = A.to(dtype)
+
+    # Compute per [row, block] absmax
+    A_blocks = A_pad.view(order, num_blocks_row, blocksize)
+    amax = A_blocks.abs().amax(dim=2)
+    absmax.copy_(amax.reshape(-1))
+
+    # Normalize and quantize
+    # Avoid div-by-zero: where amax == 0, keep zeros
+    denom = amax.clamp_min(1e-12).unsqueeze(-1)
+    norm_vals = (A_blocks / denom)  # shape [order, num_blocks, blocksize]
+
+    # Compute nearest code indices
+    # Broadcast code to last dim and take argmin of absolute difference
+    diffs = (norm_vals.unsqueeze(-1) - code_sorted.view(1, 1, 1, -1)).abs()
+    idx = torch.argmin(diffs, dim=-1)  # [order, num_blocks, blocksize]
+    if sort_idx is not None:
+        idx = sort_idx[idx]
+
+    # Zero-out indices where amax == 0 (all-zero block)
+    zero_mask = (amax == 0.0).unsqueeze(-1)
+    idx = torch.where(zero_mask, torch.zeros_like(idx), idx)
+
+    # Trim padded columns back to [order, order]
+    idx_full = idx.view(order, num_blocks_row * blocksize)[:, :order]
+    indices_flat = idx_full.reshape(-1)
+
+    # Pack indices
+    packed = _pack_indices(indices_flat.to(torch.int64), bits)
+    out[: packed.numel()].copy_(packed)
+
+    if store_diag:
+        diag.copy_(A.diag().to(torch.float32))
+        return out, absmax, diag
+    return out, absmax
+
+
+def _dequantize_blockwise_vectorized(
+    A: Tensor,
+    code: Tensor,
+    order: int,
+    absmax: Tensor,
+    outdtype = torch.float32,
+    out: Optional[Tensor] = None,
+    blocksize: int = 256,
+    bits: int = 8,
+    diag: Optional[Tensor] = None,
+):
+    if bits not in (4, 8):
+        raise ValueError(f"Unsupported bit width on vectorized dequantization: {bits}")
+    if blocksize <= 0:
+        raise ValueError("blocksize must be positive.")
+
+    device = A.device
+    values_per_byte = 8 // bits
+    num_blocks_row = math.ceil(order / blocksize)
+    total_blocks = order * num_blocks_row
+    total_elems = order * order
+
+    if absmax.device != device:
+        raise ValueError("absmax tensor must live on the same device as quantized data.")
+    if absmax.numel() != total_blocks:
+        raise ValueError(f"absmax has {absmax.numel()} entries, expected {total_blocks}.")
+
+    code_float = code.to(device=device, dtype=torch.float32)
+    # Unpack indices for [order, order]
+    indices = _unpack_indices(A, total_elems, bits, device)
+    indices = indices.view(order, order)
+
+    # Pad indices up to blocks for gather
+    pad_cols = num_blocks_row * blocksize - order
+    if pad_cols:
+        indices_pad = torch.nn.functional.pad(indices, (0, pad_cols, 0, 0))
+    else:
+        indices_pad = indices
+
+    # Map indices to code values
+    vals = code_float[indices_pad.long()]
+    vals = vals.view(order, num_blocks_row, blocksize)
+
+    # Scale by amax per block
+    amax = absmax.view(order, num_blocks_row).unsqueeze(-1)
+    vals = vals * amax
+
+    # Trim padded columns and set dtype
+    vals_full = vals.view(order, num_blocks_row * blocksize)[:, :order]
+    result = vals_full.to(outdtype)
+
+    # If diag provided, overwrite diagonal
+    if diag is not None:
+        if diag.device != device:
+            raise ValueError("diag tensor must live on the same device as quantized data.")
+        if diag.numel() != order:
+            raise ValueError(f"diag tensor must have length {order}.")
+        result.diagonal().copy_(diag.to(outdtype))
+
+    if out is None:
+        return result
+
+    if out.shape != (order, order):
+        out.resize_(order, order)
+    if out.dtype != outdtype:
+        raise ValueError("Provided output tensor has incorrect dtype.")
+    out.copy_(result)
+    return out
 
     return out
 

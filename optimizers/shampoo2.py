@@ -124,16 +124,21 @@ class Preconditioner:
         self._partitioner = BlockPartitioner(reshaped_var, prec_maxorder)
         shapes = self._partitioner.shapes_for_preconditioners()
         rank = len(self._transformed_shape)
-        device = var.get_device()
+        device = var.device
+        # On non-CUDA devices (e.g., MPS/CPU), disable low-bit quantization to
+        # avoid slow Python/CPU fallback in qtensor ops. Keep the numerics in
+        # 32-bit and let only CUDA leverage 4/8-bit paths.
+        effective_bits = prec_bits if (var.is_cuda or (var.device.type == 'mps')) else 32
+        self._active = False
         if rank <= 1:
             self.statistics = []
             self.preconditioners = []
         else:
             eps = self.matrix_eps
-            self.statistics = [QTensorSVDFast(eps * torch.eye(s[0], device=device), bits=prec_bits, 
+            self.statistics = [QTensorSVDFast(eps * torch.eye(s[0], device=device), bits=effective_bits, 
                                name2qmap=name2qmap, code=CODE, blocksize=quan_blocksize, min_lowbit_size=min_lowbit_size,
                                rect_t1=rect_t1, rect_t2=rect_t2) for s in shapes]
-            self.preconditioners = [QTensorDiagReal(torch.eye(s[0], device=device), bits=prec_bits, 
+            self.preconditioners = [QTensorDiagReal(torch.eye(s[0], device=device), bits=effective_bits, 
                                name2qmap=name2qmap, code=CODE, blocksize=quan_blocksize, min_lowbit_size=min_lowbit_size) for s in shapes]
 
     def set_device(self, device):
@@ -180,6 +185,8 @@ class Preconditioner:
             else:
                 statistics_i_de, _ = statistics_i.dequantize()
                 preconditioners_i.quantize(ComputePower(statistics_i_de.float(), exp, ridge_epsilon=eps).to(statistics_i_de.dtype))
+        # mark preconditioners as ready for use
+        self._active = True
 
     def preconditioned_grad(self, grad):
         """Precondition the gradient.
@@ -213,6 +220,9 @@ class Preconditioner:
 
         merged_grad = self._partitioner.merge_partitions(preconditioned_partitioned_grads)
         return torch.reshape(merged_grad, self._original_shape)
+
+    def is_active(self) -> bool:
+        return self._active
 
 
 class ShampooSGD(optim.Optimizer):
@@ -290,7 +300,7 @@ class ShampooSGD(optim.Optimizer):
 
                 # Precondition gradients
                 shampoo_grad = grad
-                if state['step'] >= start_prec_step:
+                if state['step'] >= start_prec_step and preconditioner.is_active():
                     shampoo_grad = preconditioner.preconditioned_grad(grad)
                     shampoo_grad.mul_(grad.norm() / (shampoo_grad.norm() + 1e-12))
 
@@ -388,7 +398,7 @@ class ShampooAdamW(optim.Optimizer):
 
                 # Precondition gradients
                 shampoo_grad = grad
-                if state['step'] >= start_prec_step:
+                if state['step'] >= start_prec_step and preconditioner.is_active():
                     shampoo_grad = preconditioner.preconditioned_grad(grad)
                     shampoo_grad.mul_(grad.norm() / (shampoo_grad.norm() + 1e-12))
 

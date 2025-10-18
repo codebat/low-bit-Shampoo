@@ -149,7 +149,7 @@ def build_dataloaders(
     train_set = datasets.CIFAR100(root=root, train=True, download=download, transform=train_tf)
     test_set = datasets.CIFAR100(root=root, train=False, download=download, transform=val_tf)
 
-    pin_memory = device.type in {"cuda", "mps"}
+    pin_memory = device.type == "cuda"
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
