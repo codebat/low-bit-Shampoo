@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import csv
 import os
 import time
 from contextlib import nullcontext
@@ -81,6 +82,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--print-freq", default=50, type=int)
     parser.add_argument("--output", default="./checkpoints", type=str, help="directory to store checkpoints and logs")
+    parser.add_argument("--run-name", default=None, type=str, help="identifier written to metrics logs")
+    parser.add_argument("--metrics-file", default=None, type=str, help="optional CSV file to append per-epoch metrics")
     return parser.parse_args()
 
 
@@ -273,7 +276,7 @@ def train_one_epoch(
     print_freq: int,
     amp_enabled: bool,
     scaler: torch.cuda.amp.GradScaler | None = None,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float]:
     model.train()
     loss_meter = AverageMeter()
     top1_meter = AverageMeter()
@@ -317,7 +320,7 @@ def train_one_epoch(
             )
             start = time.time()
 
-    return top1_meter.avg, loss_meter.avg
+    return top1_meter.avg, top5_meter.avg, loss_meter.avg
 
 
 @torch.no_grad()
@@ -327,7 +330,7 @@ def evaluate(
     data_loader: DataLoader,
     device: torch.device,
     amp_enabled: bool,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float]:
     model.eval()
     loss_meter = AverageMeter()
     top1_meter = AverageMeter()
@@ -350,7 +353,7 @@ def evaluate(
         f"Validation  Loss {loss_meter.avg:.4f}  Top1 {top1_meter.avg:.2f}  Top5 {top5_meter.avg:.2f}",
         flush=True,
     )
-    return top1_meter.avg, loss_meter.avg
+    return top1_meter.avg, top5_meter.avg, loss_meter.avg
 
 
 def main() -> None:
@@ -363,6 +366,7 @@ def main() -> None:
         print(f"Auto-selected device: {resolved}")
     else:
         print(f"Using device: {resolved}")
+    run_name = args.run_name or f"{args.model}_{args.optimizer}_bits{args.prec_bits}_{resolved}"
 
     torch.backends.cudnn.benchmark = use_cuda
 
@@ -390,40 +394,116 @@ def main() -> None:
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    metrics_writer: csv.writer | None = None
+    metrics_file = None
+    if args.metrics_file:
+        metrics_path = Path(args.metrics_file)
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not metrics_path.exists()
+        metrics_file = metrics_path.open("a", newline="")
+        metrics_writer = csv.writer(metrics_file)
+        if write_header:
+            metrics_writer.writerow(
+                [
+                    "run",
+                    "epoch",
+                    "split",
+                    "top1",
+                    "top5",
+                    "loss",
+                    "wall_clock_min",
+                    "lr",
+                    "optimizer",
+                    "prec_bits",
+                    "device",
+                    "model",
+                    "batch_size",
+                    "amp",
+                ]
+            )
 
     best_top1 = 0.0
-    for epoch in range(1, args.epochs + 1):
-        top1_train, loss_train = train_one_epoch(
-            model,
-            criterion,
-            optimizer,
-            train_loader,
-            device,
-            epoch,
-            args.print_freq,
-            amp_enabled=amp_enabled,
-            scaler=scaler,
-        )
+    try:
+        for epoch in range(1, args.epochs + 1):
+            top1_train, top5_train, loss_train = train_one_epoch(
+                model,
+                criterion,
+                optimizer,
+                train_loader,
+                device,
+                epoch,
+                args.print_freq,
+                amp_enabled=amp_enabled,
+                scaler=scaler,
+            )
 
-        top1_val, loss_val = evaluate(model, criterion, val_loader, device, amp_enabled=amp_enabled)
-        best_top1 = max(best_top1, top1_val)
+            top1_val, top5_val, loss_val = evaluate(model, criterion, val_loader, device, amp_enabled=amp_enabled)
+            best_top1 = max(best_top1, top1_val)
 
-        if scheduler is not None:
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
 
-        ckpt_path = output_dir / f"{args.model}_{args.optimizer}_epoch{epoch}.pt"
-        torch.save(
-            {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "epoch": epoch,
-                "top1_train": top1_train,
-                "top1_val": top1_val,
-            },
-            ckpt_path,
-        )
-        print(f"Saved checkpoint to {ckpt_path}")
-        print(f"Best validation Top1 so far: {best_top1:.2f}%")
+            ckpt_path = output_dir / f"{args.model}_{args.optimizer}_epoch{epoch}.pt"
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "top1_train": top1_train,
+                    "top5_train": top5_train,
+                    "loss_train": loss_train,
+                    "top1_val": top1_val,
+                    "top5_val": top5_val,
+                    "loss_val": loss_val,
+                },
+                ckpt_path,
+            )
+            print(f"Saved checkpoint to {ckpt_path}")
+            print(f"Best validation Top1 so far: {best_top1:.2f}%")
+
+            if metrics_writer is not None and metrics_file is not None:
+                wall_clock_minutes = (time.time() - overall_start) / 60.0
+                current_lr = optimizer.param_groups[0]["lr"]
+                metrics_writer.writerow(
+                    [
+                        run_name,
+                        epoch,
+                        "train",
+                        top1_train,
+                        top5_train,
+                        loss_train,
+                        wall_clock_minutes,
+                        current_lr,
+                        args.optimizer,
+                        args.prec_bits,
+                        resolved,
+                        args.model,
+                        args.batch_size,
+                        int(amp_enabled),
+                    ]
+                )
+                metrics_writer.writerow(
+                    [
+                        run_name,
+                        epoch,
+                        "val",
+                        top1_val,
+                        top5_val,
+                        loss_val,
+                        wall_clock_minutes,
+                        current_lr,
+                        args.optimizer,
+                        args.prec_bits,
+                        resolved,
+                        args.model,
+                        args.batch_size,
+                        int(amp_enabled),
+                    ]
+                )
+                metrics_file.flush()
+    finally:
+        if metrics_file is not None:
+            metrics_file.close()
 
     total_elapsed = time.time() - overall_start
     print(f"Training completed in {total_elapsed:.2f} seconds.")

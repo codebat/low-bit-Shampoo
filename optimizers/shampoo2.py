@@ -130,6 +130,7 @@ class Preconditioner:
         # 32-bit and let only CUDA leverage 4/8-bit paths.
         effective_bits = prec_bits if (var.is_cuda or (var.device.type == 'mps')) else 32
         self._active = False
+        self._warned_null_preconditioner = False
         if rank <= 1:
             self.statistics = []
             self.preconditioners = []
@@ -209,13 +210,20 @@ class Preconditioner:
             rank = len(grad.shape)
             precond_grad = grad
             for j in range(rank):
-                preconditioner = preconditioners_for_grad[j].dequantize()
-                preconditioner = preconditioner.to(grad.dtype)
+                preconditioner_tensor = preconditioners_for_grad[j].dequantize()
+                if preconditioner_tensor is None:
+                    if not self._warned_null_preconditioner:
+                        print("Warning: encountered empty Shampoo preconditioner; using identity fallback.")
+                        self._warned_null_preconditioner = True
+                    dim = grad.shape[1] if j == 1 else grad.shape[0]
+                    preconditioner_tensor = torch.eye(dim, device=grad.device, dtype=grad.dtype)
+                else:
+                    preconditioner_tensor = preconditioner_tensor.to(grad.dtype)
 
                 if j == 1:
-                    precond_grad = precond_grad @ preconditioner
+                    precond_grad = precond_grad @ preconditioner_tensor
                 else:
-                    precond_grad = preconditioner @ precond_grad
+                    precond_grad = preconditioner_tensor @ precond_grad
             preconditioned_partitioned_grads.append(precond_grad)
 
         merged_grad = self._partitioner.merge_partitions(preconditioned_partitioned_grads)
