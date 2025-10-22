@@ -1,0 +1,3 @@
+run,epoch,split,top1,top5,loss,wall_clock_min,lr,optimizer,prec_bits,device,model,batch_size,amp
+Shampoo2 debug,1,train,7.334,25.026,4.065997918548584,2.4072460492451984,0.0,shampoo2-adamw,4,mps,resnet34,256,1
+Shampoo2 debug,1,val,9.1,29.93,5.1045056640625,2.4072460492451984,0.0,shampoo2-adamw,4,mps,resnet34,256,1

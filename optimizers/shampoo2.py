@@ -173,6 +173,12 @@ class Preconditioner:
                     stat = grad @ grad.T
 
                 statistics_i, Vt = self.statistics[j*rank + i].dequantize()
+                if statistics_i is None:
+                    if not self._warned_null_preconditioner:
+                        print("Warning: encountered empty Shampoo statistics; reinitializing with epsilon*I.")
+                        self._warned_null_preconditioner = True
+                    dim = stat.shape[0]
+                    statistics_i = (self.matrix_eps * torch.eye(dim, device=stat.device, dtype=stat.dtype)).clone()
                 statistics_i.mul_(w1).add_(stat, alpha=w2)
                 self.statistics[j*rank + i].quantize(statistics_i, Vt)
 
@@ -182,9 +188,28 @@ class Preconditioner:
         eps = self.matrix_eps
         for statistics_i, preconditioners_i in zip(self.statistics, self.preconditioners):
             if self.inv_root_mode == 0:
-                preconditioners_i.quantize(statistics_i.computepower(exp, ridge_epsilon=eps))
+                out = statistics_i.computepower(exp, ridge_epsilon=eps)
+                if out is None:
+                    if hasattr(preconditioners_i, 'var_order') and preconditioners_i.var_order is not None:
+                        dim = int(preconditioners_i.var_order)
+                    elif hasattr(preconditioners_i, 'diag') and preconditioners_i.diag is not None:
+                        dim = int(preconditioners_i.diag.numel())
+                    else:
+                        dim = int(self._transformed_shape[0])
+                    device = preconditioners_i.var.device if hasattr(preconditioners_i, 'var') else 'cpu'
+                    out = torch.eye(dim, device=device, dtype=torch.float32)
+                preconditioners_i.quantize(out)
             else:
                 statistics_i_de, _ = statistics_i.dequantize()
+                if statistics_i_de is None:
+                    if hasattr(preconditioners_i, 'var_order') and preconditioners_i.var_order is not None:
+                        dim = int(preconditioners_i.var_order)
+                    elif hasattr(preconditioners_i, 'diag') and preconditioners_i.diag is not None:
+                        dim = int(preconditioners_i.diag.numel())
+                    else:
+                        dim = int(self._transformed_shape[0])
+                    device = preconditioners_i.var.device if hasattr(preconditioners_i, 'var') else 'cpu'
+                    statistics_i_de = eps * torch.eye(dim, device=device, dtype=torch.float32)
                 preconditioners_i.quantize(ComputePower(statistics_i_de.float(), exp, ridge_epsilon=eps).to(statistics_i_de.dtype))
         # mark preconditioners as ready for use
         self._active = True

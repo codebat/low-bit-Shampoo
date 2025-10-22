@@ -169,6 +169,12 @@ class Preconditioner:
                     stat = grad @ grad.T
 
                 statistics_i = self.statistics[j*rank + i].dequantize()
+                if statistics_i is None:
+                    if not self._warned_null_preconditioner:
+                        print("Warning: encountered empty Shampoo statistics; reinitializing with epsilon*I.")
+                        self._warned_null_preconditioner = True
+                    dim = stat.shape[0]
+                    statistics_i = (self.matrix_eps * torch.eye(dim, device=stat.device, dtype=stat.dtype)).clone()
                 statistics_i.mul_(w1).add_(stat, alpha=w2)
                 self.statistics[j*rank + i].quantize(statistics_i)
 
@@ -178,7 +184,19 @@ class Preconditioner:
         eps = self.matrix_eps
         for statistics_i, preconditioners_i in zip(self.statistics, self.preconditioners):
             statistics_i_de = statistics_i.dequantize()
-            preconditioners_i.quantize(ComputePower(statistics_i_de.float(), exp, ridge_epsilon=eps).to(statistics_i_de.dtype))
+            if statistics_i_de is None:
+                # Determine matrix order robustly from quantizer metadata
+                if hasattr(preconditioners_i, 'var_order') and preconditioners_i.var_order is not None:
+                    dim = int(preconditioners_i.var_order)
+                elif hasattr(preconditioners_i, 'diag') and preconditioners_i.diag is not None:
+                    dim = int(preconditioners_i.diag.numel())
+                else:
+                    # Last resort: use transformed shape (square)
+                    dim = int(self._transformed_shape[0])
+                device = preconditioners_i.var.device if hasattr(preconditioners_i, 'var') else 'cpu'
+                statistics_i_de = (eps * torch.eye(dim, device=device)).to(torch.float32)
+            out = ComputePower(statistics_i_de.float(), exp, ridge_epsilon=eps).to(statistics_i_de.dtype)
+            preconditioners_i.quantize(out)
         # mark preconditioners as ready for use
         self._active = True
 

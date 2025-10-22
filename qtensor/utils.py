@@ -27,7 +27,22 @@ class QTensor:
     
     def quantize(self, var):
         if self.bits < 16:
-            F.quantize_blockwise(var.contiguous(), code=self.name2qmap[self.code], order=self.var_order, absmax=self.absmax, out=self.var, blocksize=self.blocksize, bits=self.bits)
+            # Allow dynamic change of order if the target matrix size changes
+            if var.shape[0] != self.var_order:
+                self.var_order = var.shape[0]
+                self.var_dtype = var.dtype
+                self.var = None  # trigger reallocation in functional
+                self.absmax = None
+            out, absmax = F.quantize_blockwise(
+                var.contiguous(),
+                code=self.name2qmap[self.code],
+                order=self.var_order,
+                absmax=self.absmax,
+                out=self.var,
+                blocksize=self.blocksize,
+                bits=self.bits,
+            )
+            self.var, self.absmax = out, absmax
         else:
             self.var = var.to(self.var.dtype)
 
@@ -69,7 +84,24 @@ class QTensorDiagReal:
     
     def quantize(self, var):
         if self.bits < 16:
-            F.quantize_blockwise_diagreal(var.contiguous(), code=self.name2qmap[self.code], order=self.var_order, absmax=self.absmax, diag=self.diag, out=self.var, blocksize=self.blocksize, bits=self.bits)
+            # Allow dynamic change of order if the target matrix size changes
+            if var.shape[0] != self.var_order:
+                self.var_order = var.shape[0]
+                self.var_dtype = var.dtype
+                self.var = None  # trigger reallocation in functional
+                self.absmax = None
+                self.diag = None
+            out, absmax, diag = F.quantize_blockwise_diagreal(
+                var.contiguous(),
+                code=self.name2qmap[self.code],
+                order=self.var_order,
+                absmax=self.absmax,
+                diag=self.diag,
+                out=self.var,
+                blocksize=self.blocksize,
+                bits=self.bits,
+            )
+            self.var, self.absmax, self.diag = out, absmax, diag
         else:
             self.var = var.to(self.var.dtype)
 
