@@ -86,13 +86,17 @@ def _load_metrics(path: Path) -> List[Dict[str, str]]:
 
 
 def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
-    if window <= 1:
+    values = np.asarray(values, dtype=np.float64)
+    n = len(values)
+    if window <= 1 or n == 0:
         return values
-    if window > len(values):
-        window = len(values)
-    kernel = np.ones(window, dtype=np.float64) / window
-    # use 'same' to keep array length consistent with original
-    return np.convolve(values, kernel, mode="same")
+    w = min(window, n)
+
+    c = np.cumsum(np.insert(values, 0, 0.0))
+    tail = (c[w:] - c[:-w]) / w                 # length n - w + 1
+    head = (c[1:w] - c[0]) / np.arange(1, w)    # lengths 1..w-1
+    return np.concatenate([head, tail])
+
 
 
 def _prepare_series(
