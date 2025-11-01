@@ -752,4 +752,14 @@ def compute_power(Vt, S, p, iter_count=4, ridge_epsilon=1e-6):
         Vt = 1.5 * Vt - 0.5 * Vt @ Vt.T @ Vt
     rho = ridge_epsilon * S.max()
 
-    return Vt.T @ (1 / (S + rho).pow(1 / p)).diag() @ Vt
+    num_eigs = S.numel()
+    keep = max(1, num_eigs // 2)
+
+    if keep < num_eigs:
+        sorted_vals, sorted_idx = torch.sort(S)
+        keep_idx = sorted_idx[:keep]
+        S = sorted_vals[:keep]
+        Vt = Vt[keep_idx, :]
+
+    inv_diag = 1 / (S + rho).pow(1 / p)
+    return Vt.T @ inv_diag.diag() @ Vt
