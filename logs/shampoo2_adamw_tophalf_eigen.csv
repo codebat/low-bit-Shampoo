@@ -1,0 +1,9 @@
+run,epoch,split,top1,top5,loss,wall_clock_min,lr,optimizer,prec_bits,device,model,batch_size,amp
+Shampoo2 AdamW top half eigenExperiment,1,train,7.042,24.658,4.090039968338012,1.68317764600118,0.0005,shampoo2-adamw,4,mps,resnet34,256,1
+Shampoo2 AdamW top half eigenExperiment,1,val,10.67,33.28,3.798580078125,1.68317764600118,0.0005,shampoo2-adamw,4,mps,resnet34,256,1
+Shampoo2 AdamW top half eigenExperiment,2,train,15.66,42.13,3.482203044433594,2.80635351339976,0.0,shampoo2-adamw,4,mps,resnet34,256,1
+Shampoo2 AdamW top half eigenExperiment,2,val,19.58,48.43,3.2796951904296874,2.80635351339976,0.0,shampoo2-adamw,4,mps,resnet34,256,1
+Shampoo2 AdamW top half eigenExperiment,1,train,8.154,26.982,3.9952488230895997,1.6666648864746094,0.0005,shampoo2-adamw,4,mps,resnet34,256,1
+Shampoo2 AdamW top half eigenExperiment,1,val,11.97,36.86,3.6733626892089846,1.6666648864746094,0.0005,shampoo2-adamw,4,mps,resnet34,256,1
+Shampoo2 AdamW top half eigenExperiment,2,train,18.18,46.124,3.340247767410278,2.788844847679138,0.0,shampoo2-adamw,4,mps,resnet34,256,1
+Shampoo2 AdamW top half eigenExperiment,2,val,24.11,53.97,3.086729156494141,2.788844847679138,0.0,shampoo2-adamw,4,mps,resnet34,256,1

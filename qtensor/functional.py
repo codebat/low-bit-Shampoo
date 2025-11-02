@@ -747,19 +747,16 @@ def _unpack_indices(packed: Tensor, numel: int, bits: int, device: torch.device)
 
 
 @torch.no_grad()
-def compute_power(Vt, S, p, iter_count=4, ridge_epsilon=1e-6):
+def compute_power(Vt, S, p, iter_count=4, ridge_epsilon=1e-6, indices=None, max_eigen=None):
+    if indices is not None:
+        Vsel = Vt[indices]
+    else:
+        Vsel = Vt
+
     for j in range(iter_count):
-        Vt = 1.5 * Vt - 0.5 * Vt @ Vt.T @ Vt
-    rho = ridge_epsilon * S.max()
+        Vsel = 1.5 * Vsel - 0.5 * Vsel @ Vsel.T @ Vsel
 
-    num_eigs = S.numel()
-    keep = max(1, num_eigs // 2)
-
-    if keep < num_eigs:
-        sorted_vals, sorted_idx = torch.sort(S)
-        keep_idx = sorted_idx[:keep]
-        S = sorted_vals[:keep]
-        Vt = Vt[keep_idx, :]
-
+    reference = max_eigen if max_eigen is not None else S.max()
+    rho = ridge_epsilon * reference
     inv_diag = 1 / (S + rho).pow(1 / p)
-    return Vt.T @ inv_diag.diag() @ Vt
+    return Vsel.T @ inv_diag.diag() @ Vsel

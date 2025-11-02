@@ -105,9 +105,12 @@ class Preconditioner:
                 stat_decay=0.95, matrix_eps=1e-6, prec_maxorder=1200,
                 prec_bits=32, min_lowbit_size=4096, quan_blocksize=64,
                 rect_t1=1, rect_t2=4, inv_root_mode=0):
+        if not hasattr(Preconditioner, '_instance_counter'):
+            Preconditioner._instance_counter = itertools.count()
         self.stat_decay = stat_decay
         self.matrix_eps = matrix_eps
         self.inv_root_mode = inv_root_mode
+        self._log_prefix = f"pre_{next(Preconditioner._instance_counter)}"
 
         self._original_shape = var.shape
         self._transformed_shape = [x for x in var.shape if x != 1]
@@ -136,9 +139,23 @@ class Preconditioner:
             self.preconditioners = []
         else:
             eps = self.matrix_eps
-            self.statistics = [QTensorSVDFast(eps * torch.eye(s[0], device=device), bits=effective_bits, 
-                               name2qmap=name2qmap, code=CODE, blocksize=quan_blocksize, min_lowbit_size=min_lowbit_size,
-                               rect_t1=rect_t1, rect_t2=rect_t2) for s in shapes]
+            self.statistics = []
+            for idx, s in enumerate(shapes):
+                axis = idx % rank
+                block = idx // rank
+                log_prefix = f"{self._log_prefix}_block{block}_axis{axis}"
+                tensor = QTensorSVDFast(
+                    eps * torch.eye(s[0], device=device),
+                    bits=effective_bits,
+                    name2qmap=name2qmap,
+                    code=CODE,
+                    blocksize=quan_blocksize,
+                    min_lowbit_size=min_lowbit_size,
+                    rect_t1=rect_t1,
+                    rect_t2=rect_t2,
+                    log_prefix=log_prefix,
+                )
+                self.statistics.append(tensor)
             self.preconditioners = [QTensorDiagReal(torch.eye(s[0], device=device), bits=effective_bits, 
                                name2qmap=name2qmap, code=CODE, blocksize=quan_blocksize, min_lowbit_size=min_lowbit_size) for s in shapes]
 

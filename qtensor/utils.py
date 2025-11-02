@@ -1,5 +1,7 @@
 import torch
 import qtensor.functional as F
+from pathlib import Path
+import re
 
 
 class QTensor:
@@ -120,13 +122,21 @@ class QTensorDiagReal:
 
 
 class QTensorSVDFast:
-    def __init__(self, var, bits=32, name2qmap={}, code='', blocksize=2048, min_lowbit_size=4096, rect_t1=1, rect_t2=4):
+
+    def __init__(self, var, bits=32, name2qmap={}, code='', blocksize=2048, min_lowbit_size=4096, rect_t1=1, rect_t2=4, log_prefix=None):
         self.bits = bits
         self.rect_t1 = rect_t1
         self.rect_t2 = rect_t2
+        self.log_prefix = log_prefix
+        self._log_written = False
 
         Vt = torch.eye(var.shape[0], device=var.device)
-        self.Svalue = var[0][0] * Vt.diag()
+        n = var.shape[0]
+        keep = max(1, n // 2)
+        base_vals = var[0][0] * Vt.diag()
+        self.keep_indices = torch.arange(n, device=var.device, dtype=torch.int64)[:keep]
+        self.Svalue = base_vals[self.keep_indices].clone()
+        self.max_eigenvalue = base_vals.max().clone()
 
         if self.bits in [32, 16] or var.numel() < min_lowbit_size:
             self.var = Vt
@@ -145,12 +155,41 @@ class QTensorSVDFast:
     
     def quantize(self, var, Vt=None):
         V, _ = torch.linalg.qr(var.float() @ Vt.T.float())
-        self.Svalue = (V.T @ var.float() @ V).diag()
+        full_eigs = (V.T @ var.float() @ V).diag()
+
+        keep = max(1, full_eigs.numel() // 2)
+        sorted_vals, sorted_idx = torch.sort(full_eigs)
+        keep_idx = sorted_idx[:keep]
+        self.keep_indices = keep_idx.to(dtype=torch.int64)
+        self.Svalue = sorted_vals[:keep].to(var.dtype)
+        discarded_vals = sorted_vals[keep:].to(var.dtype)
+        self.max_eigenvalue = full_eigs.max().to(var.dtype)
 
         if self.bits < 16:
             F.quantize_blockwise(V.T.contiguous(), code=self.name2qmap[self.code], order=self.var_order, absmax=self.absmax, out=self.var, blocksize=self.blocksize, bits=self.bits)
         else:
             self.var = V.T.contiguous()
+
+        if self.log_prefix and not self._log_written:
+            log_dir = Path("logs")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            kept = self.Svalue.detach().cpu()
+            discarded = discarded_vals.detach().cpu()
+            total_sum = full_eigs.sum().item()
+            kept_sum = kept.sum().item()
+            discarded_sum = discarded.sum().item()
+            safe_prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", self.log_prefix)
+            path = log_dir / f"eigenvalues_{safe_prefix}.csv"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("category,value\n")
+                for val in kept:
+                    f.write(f"kept,{float(val)}\n")
+                for val in discarded:
+                    f.write(f"discarded,{float(val)}\n")
+                f.write(f"ratio_kept,{kept_sum / total_sum if total_sum != 0 else 0.0}\n")
+                f.write(f"ratio_discarded,{discarded_sum / total_sum if total_sum != 0 else 0.0}\n")
+            self._log_written = True
+
 
     def dequantize(self):
         if self.bits < 16:
@@ -160,19 +199,40 @@ class QTensorSVDFast:
         else:
             Vt = self.var
 
-        return Vt.T @ self.Svalue.diag() @ Vt, Vt
+        keep_idx = self.keep_indices.to(device=Vt.device)
+        Svals = self.Svalue.to(device=Vt.device, dtype=Vt.dtype)
+        V_subset = Vt[keep_idx]
+        return V_subset.T @ Svals.diag() @ V_subset, Vt
 
     def computepower(self, exp, ridge_epsilon=1e-6):
         if self.bits < 16:
             Vt = F.dequantize_blockwise(self.var, code=self.name2qmap[self.code], order=self.var_order, absmax=self.absmax, outdtype=self.var_dtype, blocksize=self.blocksize, bits=self.bits)
-            return F.compute_power(Vt, self.Svalue, exp, iter_count=self.rect_t2, ridge_epsilon=ridge_epsilon)
+            return F.compute_power(
+                Vt,
+                self.Svalue,
+                exp,
+                iter_count=self.rect_t2,
+                ridge_epsilon=ridge_epsilon,
+                indices=self.keep_indices,
+                max_eigen=self.max_eigenvalue,
+            )
         else:
             Vt = self.var
-            return F.compute_power(Vt, self.Svalue, exp, iter_count=0, ridge_epsilon=ridge_epsilon)
+            return F.compute_power(
+                Vt,
+                self.Svalue,
+                exp,
+                iter_count=0,
+                ridge_epsilon=ridge_epsilon,
+                indices=self.keep_indices,
+                max_eigen=self.max_eigenvalue,
+            )
 
     def set_device(self, device):
         if self.bits < 16:
             self.name2qmap[self.code] = self.name2qmap[self.code].to(device)
             self.absmax = self.absmax.to(device)
         self.Svalue = self.Svalue.to(device)
+        self.keep_indices = self.keep_indices.to(device)
+        self.max_eigenvalue = self.max_eigenvalue.to(device)
         self.var = self.var.to(device)
