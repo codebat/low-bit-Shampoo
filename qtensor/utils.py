@@ -181,13 +181,11 @@ class QTensorSVDFast:
             safe_prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", self.log_prefix)
             path = log_dir / f"eigenvalues_{safe_prefix}.csv"
             with open(path, "w", encoding="utf-8") as f:
-                f.write("category,value\n")
-                for val in kept:
-                    f.write(f"kept,{float(val)}\n")
-                for val in discarded:
-                    f.write(f"discarded,{float(val)}\n")
-                f.write(f"ratio_kept,{kept_sum / total_sum if total_sum != 0 else 0.0}\n")
-                f.write(f"ratio_discarded,{discarded_sum / total_sum if total_sum != 0 else 0.0}\n")
+                f.write("rank,value\n")
+                for idx, val in enumerate(kept, start=1):
+                    f.write(f"{idx},{float(val)}\n")
+                for offset, val in enumerate(discarded, start=len(kept) + 1):
+                    f.write(f"{offset},{float(val)}\n")
             self._log_written = True
 
 
